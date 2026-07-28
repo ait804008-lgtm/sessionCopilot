@@ -1,0 +1,17 @@
+# Swift/Xcode
+.build/
+.swiftpm/
+*.xcodeproj/
+xcuserdata/
+DerivedData/
+
+# macOS
+.DS_Store
+*.app
+
+# Archives
+*.zip
+
+# IDE
+.vscode/
+.idea/

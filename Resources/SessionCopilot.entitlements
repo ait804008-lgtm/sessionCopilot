@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- SessionCopilot runs UNSANDBOXED as a menu-bar utility. This is
+         intentional: SCStream audio capture + global hotkeys + floating
+         overlay across spaces + arbitrary file I/O for session exports
+         are all significantly harder under the App Sandbox. -->
+
+    <!-- App Sandbox: disabled. The binary is ad-hoc signed (no Developer
+         ID) in the default build script. A real distribution build
+         should be Developer ID-signed and notarized. -->
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+
+    <!-- Microphone capture (AVAudioEngine input tap). -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+
+    <!-- Speech recognition (SFSpeechRecognizer). -->
+    <key>com.apple.security.speech-recognition</key>
+    <true/>
+
+    <!-- Network access for LLM provider calls (OpenAI, Anthropic,
+         DeepSeek, etc.) and optional Deepgram STT. -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+
+    <!-- User-selected file access for resume import and session export.
+         Only active when the user explicitly selects a file via
+         NSOpenPanel / NSSavePanel. -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+
+    <!-- NOTE: ScreenCaptureKit does NOT require a separate entitlement
+         on non-sandboxed apps. It is gated entirely by the TCC Screen
+         Recording permission, which is granted via System Settings →
+         Privacy & Security → Screen Recording. The plist key
+         NSScreenCaptureUsageDescription controls the prompt text. -->
+</dict>
+</plist>

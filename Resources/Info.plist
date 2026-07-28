@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Bundle identity. Must match the codesign --identifier used by
+         scripts/build_app_bundle.sh so TCC grants are stable across
+         rebuilds. -->
+    <key>CFBundleIdentifier</key>
+    <string>com.sessioncopilot.app</string>
+
+    <key>CFBundleName</key>
+    <string>SessionCopilot</string>
+    <key>CFBundleDisplayName</key>
+    <string>SessionCopilot</string>
+
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleExecutable</key>
+    <string>SessionCopilot</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+
+    <!-- Run as a menu-bar agent (no Dock icon, no main menu). The app
+         manages its own NSStatusItem and overlay panels. -->
+    <key>LSUIElement</key>
+    <true/>
+
+    <!-- TCC usage descriptions. REQUIRED for the corresponding permissions
+         to be granted. Without these, macOS silently denies the API and
+         SCStream returns noErr from startCapture() but never delivers
+         audio buffers. -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>SessionCopilot captures microphone audio for real-time transcription during your sessions.</string>
+
+    <key>NSScreenCaptureUsageDescription</key>
+    <string>SessionCopilot captures system audio (the audio playing through your speakers, such as interviewer speech from Teams or Zoom) to provide interview and meeting assistance. Screen content is not recorded or stored — only audio is captured.</string>
+
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>SessionCopilot uses on-device speech recognition to transcribe audio during your sessions. Audio is processed locally and never leaves your device.</string>
+
+    <!-- Optional: enable Apple Events / automation if you wire up
+         browser automation later. Currently unused. -->
+    <key>NSAppleEventsUsageDescription</key>
+    <string>SessionCopilot may send Apple Events to control other apps for assisted workflows. This is optional and only used if explicitly enabled.</string>
+</dict>
+</plist>
