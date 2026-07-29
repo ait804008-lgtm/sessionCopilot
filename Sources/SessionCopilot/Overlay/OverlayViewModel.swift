@@ -108,4 +108,15 @@ public final class OverlayViewModel: ObservableObject {
         isDetectingSpeech = active
         onChanged()
     }
+
+    // MARK: - Transcription State
+
+    /// True while waiting for a batch STT response (Deepgram pre-recorded API).
+    public var isTranscribing: Bool = false
+
+    public func setTranscribing(_ active: Bool) {
+        guard isTranscribing != active else { return }
+        isTranscribing = active
+        onChanged()
+    }
 }

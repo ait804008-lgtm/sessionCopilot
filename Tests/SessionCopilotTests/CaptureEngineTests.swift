@@ -136,21 +136,41 @@ import Testing
         #expect(!again)
     }
 
-    @Test("Speech level just above threshold counts as speech")
+    @Test("Speech level just above onset threshold counts as speech")
     func speechJustAboveThreshold() {
         let d = QuestionDetector(silenceThreshold: 0.5)
-        // speechLevelThreshold is 0.05; 0.06 should count as speech
-        d.feed(level: 0.06, deltaTime: 0.1)
+        // speechOnThreshold is 0.08; 0.09 should count as speech
+        d.feed(level: 0.09, deltaTime: 0.1)
         #expect(d.isSpeaking)
     }
 
-    @Test("Silence level just below threshold counts as silence")
-    func silenceJustBelowThreshold() {
+    @Test("Silence level just above offset threshold still counts as speech (hysteresis)")
+    func silenceJustAboveOffsetThreshold() {
+        let d = QuestionDetector(silenceThreshold: 0.5)
+        d.feed(level: 0.5, deltaTime: 0.1) // speak — well above onset
+        // 0.04 > speechOffThreshold (0.03) → still considered speech (hysteresis dead zone)
+        d.feed(level: 0.04, deltaTime: 0.1)
+        #expect(d.isSpeaking)
+        #expect(d.currentSilenceDuration == 0)
+    }
+
+    @Test("Level in hysteresis dead zone does not trigger speech from silence")
+    func deadZoneNoTrigger() {
+        let d = QuestionDetector(silenceThreshold: 0.5)
+        // 0.06 is between speechOffThreshold (0.03) and speechOnThreshold (0.08).
+        // Starting from silence, this should NOT trigger speech.
+        d.feed(level: 0.06, deltaTime: 0.1)
+        #expect(!d.isSpeaking)
+    }
+
+    @Test("Drop below offset threshold triggers silence from speech")
+    func dropBelowOffsetTriggersSilence() {
         let d = QuestionDetector(silenceThreshold: 0.5)
         d.feed(level: 0.5, deltaTime: 0.1) // speak
-        // 0.04 < 0.05 threshold → silence
-        d.feed(level: 0.04, deltaTime: 0.1)
-        #expect(!d.isSpeaking || d.currentSilenceDuration > 0)
+        #expect(d.isSpeaking)
+        // 0.02 < speechOffThreshold (0.03) → transition to silence
+        d.feed(level: 0.02, deltaTime: 0.1)
+        #expect(d.currentSilenceDuration > 0)
     }
 
     @Test("Reset clears all state")

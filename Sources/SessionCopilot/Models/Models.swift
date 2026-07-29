@@ -229,6 +229,18 @@ public struct ProviderConfig: Codable, Sendable, Identifiable {
         case deepgram
         case gemini
         case custom
+
+        /// Whether this provider supports LLM chat completions (as opposed
+        /// to being STT-only like Deepgram). Used to filter `defaultConfig()`
+        /// so an STT provider never gets picked up for LLM calls.
+        public var isLLM: Bool {
+            switch self {
+            case .deepseek, .anthropic, .openai, .nemotron, .gemini, .custom:
+                return true
+            case .deepgram:
+                return false
+            }
+        }
     }
 
     public let id: UUID
