@@ -155,9 +155,10 @@ public final class DeepgramSttClient: SttClient {
                 log.error("Deepgram HTTP \(status) after \(elapsed, privacy: .public)s")
                 transcriptContinuation.yield(
                     TranscriptSegment(sessionId: sessionId, timestamp: Date(),
-                        speaker: .unknown, text: "[STT error]", isFinal: true)
+                        speaker: .unknown, text: "[STT error]", isFinal: false)
                 )
                 isFlushing = false
+                upgradeInFlightToFinal = false
                 return
             }
 
@@ -213,8 +214,9 @@ public final class DeepgramSttClient: SttClient {
             log.error("Deepgram request failed: \(error.localizedDescription, privacy: .public)")
             transcriptContinuation.yield(
                 TranscriptSegment(sessionId: sessionId, timestamp: Date(),
-                    speaker: .unknown, text: "[STT error]", isFinal: true)
+                    speaker: .unknown, text: "[STT error]", isFinal: false)
             )
+            upgradeInFlightToFinal = false
         }
 
         isFlushing = false

@@ -56,6 +56,12 @@ public final class SessionEngine {
     /// The question text that was last sent to the LLM.
     private var lastFiredQuestionText: String = ""
 
+    /// Accumulates non-final auto-flush segments while `pendingBatchQuestion`
+    /// is true. When the final segment arrives, the combined text is sent
+    /// to the LLM so long interviewer questions split across 15s chunks
+    /// aren't truncated.
+    private var batchTranscriptAccumulator: String = ""
+
     /// True when a batch STT flush has been triggered and we're waiting
     /// for the transcript to arrive through `transcriptStream`. When the
     /// next `isFinal` segment arrives, it fires the LLM.
@@ -105,6 +111,7 @@ public final class SessionEngine {
         wasSystemSpeaking = false
         lastFiredQuestionText = ""
         pendingBatchQuestion = false
+        batchTranscriptAccumulator = ""
         Log.session.info("Session starting — listenMode=\(self.listenMode, privacy: .public), stt=\(type(of: self.sttClient))")
         try await captureEngine.start()
         try await sttClient.start()
@@ -196,14 +203,31 @@ public final class SessionEngine {
                 )
                 self.viewModel.appendTranscript(tagged)
 
-                // Phase B for batch STT: when a final transcript arrives
-                // after a silence-triggered flush, fire the LLM.
+                // Phase B for batch STT: accumulate non-final auto-flush
+                // chunks while waiting for the silence-triggered final
+                // segment. When the final arrives, combine all chunks so
+                // long interviewer questions split across 15s boundaries
+                // aren't truncated.
                 if self.pendingBatchQuestion, segment.isFinal,
                    !segment.text.trimmingCharacters(in: .whitespaces).isEmpty {
                     self.pendingBatchQuestion = false
                     self.viewModel.setTranscribing(false)
-                    let questionText = segment.text.trimmingCharacters(in: .whitespaces)
-                    Log.session.info("Batch transcript arrived — \"\(questionText.prefix(60), privacy: .public)\"")
+                    // Combine accumulated chunks + the final segment.
+                    let accumulated = self.batchTranscriptAccumulator
+                        .trimmingCharacters(in: .whitespaces)
+                    let finalChunk = segment.text.trimmingCharacters(in: .whitespaces)
+                    let questionText: String
+                    if accumulated.isEmpty {
+                        questionText = finalChunk
+                    } else if accumulated.contains(finalChunk) {
+                        // Final chunk is fully contained in the accumulator
+                        // (upgraded in-flight result). Use accumulator as-is.
+                        questionText = accumulated
+                    } else {
+                        questionText = "\(accumulated) \(finalChunk)"
+                    }
+                    self.batchTranscriptAccumulator = ""
+                    Log.session.info("Batch transcript arrived — accumulated=\"\(accumulated.prefix(40), privacy: .public)\" final=\"\(finalChunk.prefix(40), privacy: .public)\" combined=\"\(questionText.prefix(60), privacy: .public)\"")
                     guard questionText != self.lastFiredQuestionText else {
                         Log.session.debug("Duplicate batch transcript, skipping LLM")
                         continue
@@ -212,6 +236,16 @@ public final class SessionEngine {
                     self.persistQuestion(questionText)
                     self.onQuestionDetected?(questionText)
                     Log.session.info("LLM fired for batch question")
+                } else if self.pendingBatchQuestion, !segment.isFinal,
+                          !segment.text.trimmingCharacters(in: .whitespaces).isEmpty {
+                    // Auto-flush chunk while waiting for final — accumulate.
+                    let chunk = segment.text.trimmingCharacters(in: .whitespaces)
+                    if self.batchTranscriptAccumulator.isEmpty {
+                        self.batchTranscriptAccumulator = chunk
+                    } else {
+                        self.batchTranscriptAccumulator += " \(chunk)"
+                    }
+                    Log.session.debug("Accumulated batch chunk: \"\(chunk.prefix(40), privacy: .public)\" (total: \(self.batchTranscriptAccumulator.count) chars)")
                 }
 
                 // Persist only final segments to avoid excessive writes
@@ -241,24 +275,31 @@ public final class SessionEngine {
 
                 Log.session.debug("Question detected — sttType=\(type(of: self.sttClient)), buffer=\"\(self.transcriptBuffer.prefix(40))\", pendingBatch=\(self.pendingBatchQuestion)")
 
-                // Clear pending state from previous cycle.
-                self.pendingQuestionText = ""
-                self.transcriptBuffer = ""
-                self.systemSilentSince = nil
-
                 if self.sttClient is DeepgramSttClient {
                     // Batch mode: trigger flush, LLM fires when transcript arrives.
+                    // Clear pending state immediately — the batch flush produces a
+                    // fresh transcript segment so we don't need the snapshot.
+                    self.pendingQuestionText = ""
+                    self.transcriptBuffer = ""
+                    self.systemSilentSince = nil
+                    self.batchTranscriptAccumulator = ""
                     Log.session.info("Triggering batch flush")
                     self.viewModel.setTranscribing(true)
                     self.pendingBatchQuestion = true
                     Task { await (self.sttClient as? DeepgramSttClient)?.triggerFlush() }
                 } else {
-                    // Streaming mode (Apple STT): fire LLM immediately with
-                    // whatever is in the transcript buffer or chat messages.
+                    // Streaming mode (Apple STT): capture question text from
+                    // the snapshot BEFORE clearing. The snapshot was taken at
+                    // the system-silent transition (see levelMeter loop).
                     var questionText = self.pendingQuestionText.trimmingCharacters(in: .whitespaces)
                     if questionText.isEmpty {
                         questionText = self.transcriptBuffer.trimmingCharacters(in: .whitespaces)
                     }
+                    // Clear pending state AFTER capturing the snapshot.
+                    self.pendingQuestionText = ""
+                    self.transcriptBuffer = ""
+                    self.systemSilentSince = nil
+
                     if questionText.isEmpty {
                         questionText = self.viewModel.chatMessages
                             .last(where: { $0.role == .user })?.text
