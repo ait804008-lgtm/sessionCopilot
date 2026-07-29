@@ -198,6 +198,34 @@ struct SettingsView: View {
 
             Divider().padding(.vertical, 4)
 
+            // --- DETECTION ---
+            SectionHeader("DETECTION")
+
+            SettingsRow(label: "Semantic Detection") {
+                Toggle("", isOn: $settingsStore.settings.semanticDetectionEnabled)
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+            }
+            .help("When enabled, candidate questions are confirmed by an LLM call before answer generation fires. Prevents spurious LLM calls on thinking pauses.")
+
+            SettingsRow(label: "Silence Threshold") {
+                Slider(value: $settingsStore.settings.silenceThreshold, in: 0.5...5.0, step: 0.1)
+                    .frame(width: 140)
+                Text(String(format: "%.1fs", settingsStore.settings.silenceThreshold))
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .frame(width: 36, alignment: .trailing)
+            }
+
+            SettingsRow(label: "Audio Recording") {
+                Toggle("", isOn: $settingsStore.settings.audioRecordingEnabled)
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+            }
+            .help("Record mic + system audio to a WAV file for each session (~10 MB / 30 min). Disable to save disk space.")
+
+            Divider().padding(.vertical, 4)
+
             // --- STT ---
             SectionHeader("SPEECH-TO-TEXT")
 

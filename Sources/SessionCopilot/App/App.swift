@@ -49,9 +49,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         if let button = statusItem.button {
             button.image = NSImage(
-                systemSymbolName: "rectangle.and.text.magnifyingglass",
-                accessibilityDescription: "SessionCopilot"
+                systemSymbolName: "circle.fill",
+                accessibilityDescription: "SessionCopilot status"
             )
+            button.image?.isTemplate = false
+            button.toolTip = "SessionCopilot — Idle"
         }
 
         let menu = NSMenu()
@@ -77,6 +79,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(quitItem)
 
         statusItem.menu = menu
+    }
+
+    /// Update the menu bar dot color and tooltip to reflect current
+    /// capture status. Mirrors the `CaptureStatus` color scheme:
+    /// gray (idle), blue (micOnly), green (systemActive),
+    /// orange (systemFallback), red (failed).
+    func updateMenuBarStatus(_ status: CaptureStatus) {
+        guard let button = statusItem?.button else { return }
+        let color: NSColor
+        switch status {
+        case .idle:            color = .secondaryLabelColor
+        case .micOnly:         color = .systemBlue
+        case .systemActive:    color = .systemGreen
+        case .systemFallback:  color = .systemOrange
+        case .failed:          color = .systemRed
+        }
+        button.contentTintColor = color
+        button.toolTip = "SessionCopilot — \(status.label)"
     }
 
     // MARK: - Hotkey
@@ -232,6 +252,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Wire question detection → answer generation
         engine.onQuestionDetected = { [weak self] questionText in
             self?.handleQuestion(questionText)
+        }
+
+        // Wire capture status → menu bar colored dot
+        capture.onStatusChange = { [weak self] status in
+            self?.updateMenuBarStatus(status)
         }
 
         // In push-to-talk mode, disable VAD before starting — user presses hotkey to enable.

@@ -34,6 +34,33 @@ public protocol LlmClient: AnyObject {
     func complete(_ request: LlmRequest) async throws -> LlmResponse
 }
 
+// MARK: - Question Classifier
+
+/// Semantic question classifier backed by an LLM.
+///
+/// Implemented by `LlmQuestionClassifier` (uses the main configured LLM)
+/// and by test mocks. Used by `SessionEngine` to gate answer generation:
+/// when `AppSettings.semanticDetectionEnabled` is true, the LLM answer
+/// is only triggered if `classify(...)` returns `isQuestion == true`.
+///
+/// `@MainActor` to match `LlmClient` — implementations typically wrap
+/// an `LlmClient` and benefit from main-actor serialization of provider
+/// state (config, API keys).
+@MainActor
+public protocol QuestionClassifier: AnyObject {
+    /// Classify whether `text` is a question directed at the candidate.
+    ///
+    /// - Parameters:
+    ///   - text: The candidate transcript text to classify. Typically the
+    ///     last `ChatMessage` with role `.user` at the moment VAD fires.
+    ///   - context: Optional context — recent transcript, profile, etc.
+    ///     Implementations may use this to disambiguate ("yes that's right"
+    ///     vs "yes, can you tell me...").
+    /// - Returns: A `QuestionClassification`. Never throws — on internal
+    ///   failure, return `.assumedNo` so the caller skips the LLM answer.
+    func classify(_ text: String, context: [String: String]) async -> QuestionClassification
+}
+
 // MARK: - Session Store
 
 @MainActor
