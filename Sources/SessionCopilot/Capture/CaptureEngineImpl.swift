@@ -41,6 +41,11 @@ public enum CaptureStatus: Sendable, Equatable {
         case .failed: return "systemRedColor"
         }
     }
+
+    /// SF Symbol name for the menu bar status dot.
+    public var dotSymbol: String {
+        return "circle.fill"
+    }
 }
 
 /// Default implementation of CaptureEngine.

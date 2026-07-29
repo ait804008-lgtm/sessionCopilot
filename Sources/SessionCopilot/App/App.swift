@@ -218,7 +218,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        let capture = CaptureEngineImpl(captureSystemAudio: true)
+        let capture = CaptureEngineImpl(
+            captureSystemAudio: true,
+            silenceThreshold: settingsStore.settings.silenceThreshold
+        )
         let stt: SttClient
         let sttProvider = settingsStore.settings.sttProvider
         let sttLanguage = settingsStore.settings.sttLanguage
@@ -244,7 +247,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             captureEngine: capture,
             sttClient: stt,
             viewModel: viewModel,
-            sessionStore: sessionStore
+            sessionStore: sessionStore,
+            audioRecordingEnabled: settingsStore.settings.audioRecordingEnabled
         )
         engine.listenMode = settingsStore.settings.listenMode
         sessionEngine = engine
@@ -453,6 +457,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let retentionDays = settingsStore.settings.retentionDays
         Task {
             try? await sessionStore.deleteSessionsOlderThan(days: retentionDays)
+            // Also clean up orphaned audio files for expired sessions.
+            AudioStorage().deleteOlderThan(days: retentionDays)
         }
     }
 
