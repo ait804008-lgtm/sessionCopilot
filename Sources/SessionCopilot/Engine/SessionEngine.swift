@@ -109,24 +109,20 @@ public final class SessionEngine {
         try await captureEngine.start()
         try await sttClient.start()
 
-        // Route audio from capture to STT.
-        // In PTT mode, only send audio while the key is held — no transcription during silence.
+        // Route audio from capture to STT and to the audio recorder.
+        // IMPORTANT: AsyncStream does NOT broadcast — multiple iterators
+        // divide elements between them. We use a single for-await loop
+        // to fan out each buffer to both consumers.
+        // In PTT mode, only send audio while the key is held — no
+        // transcription during silence.
         captureTask = Task { [weak self] in
             guard let self else { return }
+            let recorder = self.audioRecorder  // capture reference once
             for await buffer in self.captureEngine.audioStream {
                 if self.listenMode == "pushToTalk" && !self.isPTTKeyHeld { continue }
                 await self.sttClient.sendAudio(buffer.data)
-            }
-        }
-
-        // Audio recording task — runs in parallel with the STT routing
-        // task above. Both consume the same `audioStream`, which is fine
-        // because `AsyncStream` is multi-consumer.
-        if audioRecordingEnabled {
-            recordingTask = Task { [weak self] in
-                guard let self else { return }
-                for await buffer in self.captureEngine.audioStream {
-                    self.audioRecorder?.append(buffer.data)
+                if self.audioRecordingEnabled {
+                    recorder?.append(buffer.data)
                 }
             }
         }
@@ -280,6 +276,13 @@ public final class SessionEngine {
                     self.lastFiredQuestionText = questionText
                     self.persistQuestion(questionText)
                     self.onQuestionDetected?(questionText)
+
+                    // Reset the recognizer so the next question starts
+                    // fresh — otherwise the request accumulates across
+                    // utterances and can deduplicate or return stale text.
+                    if let appleStt = self.sttClient as? AppleSttClient {
+                        appleStt.restartRecognition()
+                    }
                 }
             }
         }

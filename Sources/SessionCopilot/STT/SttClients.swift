@@ -26,6 +26,16 @@ public final class DeepgramSttClient: SttClient {
     private var audioBuffer = Data()
     private var isFlushing = false
 
+    /// When true, a `triggerFlush()` (final) arrived while an auto-flush
+    /// (non-final) was in flight. The in-flight request's result will be
+    /// upgraded to `isFinal: true` when the response arrives, so the
+    /// silence-triggered question isn't dropped.
+    private var upgradeInFlightToFinal = false
+
+    /// Most recent non-empty transcript text. Used to re-emit as final
+    /// when an auto-flush returns empty but a final flush was pending.
+    private var lastTranscriptText: String = ""
+
     /// ~15 seconds of audio at 16kHz/16bit/mono = 480 KB.
     private let autoFlushThreshold = 480_000
 
@@ -53,6 +63,8 @@ public final class DeepgramSttClient: SttClient {
         sessionId = UUID()
         audioBuffer = Data()
         isFlushing = false
+        upgradeInFlightToFinal = false
+        lastTranscriptText = ""
         log.debug("Deepgram session started")
     }
 
@@ -81,6 +93,11 @@ public final class DeepgramSttClient: SttClient {
     /// and yields the final transcript.
     public func triggerFlush() async {
         log.info("triggerFlush called — isFlushing=\(self.isFlushing), bufferSize=\(self.audioBuffer.count)")
+        guard !isFlushing else {
+            log.info("triggerFlush — auto-flush in flight, upgrade result to final")
+            upgradeInFlightToFinal = true
+            return
+        }
         await flushBuffer(isFinal: true)
     }
 
@@ -157,17 +174,40 @@ public final class DeepgramSttClient: SttClient {
                !transcript.trimmingCharacters(in: .whitespaces).isEmpty {
                 let confidence = (first["confidence"] as? Double).map(Float.init)
                 log.info("Transcript: \"\(transcript.prefix(80), privacy: .public)\" confidence=\(confidence ?? 0, privacy: .public)")
+                // If a final flush was requested while this auto-flush was
+                // in flight, upgrade the result so the silence-triggered
+                // question isn't dropped (see triggerFlush() guard).
+                let effectiveFinal = isFinal || upgradeInFlightToFinal
+                if upgradeInFlightToFinal {
+                    upgradeInFlightToFinal = false
+                    log.info("Upgrading auto-flush result to final")
+                }
+                lastTranscriptText = transcript
                 let segment = TranscriptSegment(
                     sessionId: sessionId,
                     timestamp: Date(),
                     speaker: .unknown,
                     text: transcript,
-                    isFinal: isFinal,
+                    isFinal: effectiveFinal,
                     confidence: confidence
                 )
                 transcriptContinuation.yield(segment)
             } else {
                 log.warning("Deepgram returned empty transcript or unexpected format")
+                // Edge case: auto-flush returned empty, but a final flush
+                // was requested while it was in flight. Re-emit the last
+                // known transcript as final so SessionEngine unblocks.
+                if upgradeInFlightToFinal {
+                    upgradeInFlightToFinal = false
+                    let fallback = lastTranscriptText
+                    if !fallback.isEmpty {
+                        log.info("Auto-flush empty, re-emitting last transcript as final: \"\(fallback.prefix(60), privacy: .public)\"")
+                        transcriptContinuation.yield(
+                            TranscriptSegment(sessionId: sessionId, timestamp: Date(),
+                                speaker: .unknown, text: fallback, isFinal: true)
+                        )
+                    }
+                }
             }
         } catch {
             log.error("Deepgram request failed: \(error.localizedDescription, privacy: .public)")
