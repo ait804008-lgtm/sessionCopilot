@@ -45,7 +45,10 @@ public final class SessionLifecycleController {
             return
         }
 
-        let capture = CaptureEngineImpl(captureSystemAudio: true)
+        let capture = CaptureEngineImpl(
+            captureSystemAudio: true,
+            silenceThreshold: services.settingsStore.settings.silenceThreshold
+        )
         // Subscribe to status changes → menu bar indicator.
         capture.onStatusChange = { [weak self] status in
             self?.onCaptureStatusChange?(status)

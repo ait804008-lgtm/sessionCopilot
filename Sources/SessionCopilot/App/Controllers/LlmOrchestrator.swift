@@ -175,6 +175,15 @@ public final class LlmOrchestrator {
                             metadata: ["model": providerConfig.model, "provider": providerConfig.provider.rawValue]
                         ))
                     }
+                    // Restart STT after a successful answer so the next
+                    // utterance starts fresh. This was previously called
+                    // unconditionally in the question-detection callback,
+                    // which caused STT to restart even when the classifier
+                    // rejected the text — losing buffered interviewer audio.
+                    if let engine = sessionLifecycle?.sessionEngine,
+                       let appleStt = engine.sttClient as? AppleSttClient {
+                        appleStt.restartRecognition()
+                    }
                 }
                 viewModel.finalizeAssistantResponse()
                 viewModel.setStreaming(false)

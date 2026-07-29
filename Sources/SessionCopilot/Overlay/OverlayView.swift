@@ -104,6 +104,10 @@ struct OverlayView: View {
             Text("● Answering")
                 .font(.headline)
                 .foregroundColor(.orange)
+        } else if viewModel.isTranscribing {
+            Text("● Transcribing")
+                .font(.headline)
+                .foregroundColor(.blue)
         } else if viewModel.isDetectingSpeech {
             Text("● Listening")
                 .font(.headline)

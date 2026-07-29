@@ -281,9 +281,9 @@ public final class CaptureEngineImpl: @unchecked Sendable, CaptureEngine {
     // MARK: - VAD
 
     /// Detects question boundaries from system (interviewer) audio.
-    let systemDetector = QuestionDetector(silenceThreshold: 1.5)
+    let systemDetector: QuestionDetector
     /// Tracks candidate (mic) speech for speaker attribution only — does NOT fire.
-    private let micDetector = QuestionDetector(silenceThreshold: 1.5)
+    private let micDetector: QuestionDetector
     private var lastMicTime = Date()
     private var lastSystemTime = Date()
     public var onQuestionDetected: (() -> Void)?
@@ -314,8 +314,10 @@ public final class CaptureEngineImpl: @unchecked Sendable, CaptureEngine {
 
     // MARK: - Init
 
-    public init(captureSystemAudio: Bool = false) {
+    public init(captureSystemAudio: Bool = false, silenceThreshold: TimeInterval = 1.5) {
         self.captureSystemAudio = captureSystemAudio
+        self.systemDetector = QuestionDetector(silenceThreshold: silenceThreshold)
+        self.micDetector = QuestionDetector(silenceThreshold: silenceThreshold)
 
         var audioCont: AsyncStream<AudioBuffer>.Continuation!
         self.audioStream = AsyncStream { audioCont = $0 }
@@ -389,7 +391,12 @@ public final class CaptureEngineImpl: @unchecked Sendable, CaptureEngine {
             // the systemDetector from the mic so question detection still
             // works (with degraded speaker attribution).
             if self.captureSystemAudio && self.didFallbackToMic {
-                self.systemDetector.feed(level: capturedRMS, deltaTime: micDelta)
+                let micDetected = self.systemDetector.feed(level: capturedRMS, deltaTime: micDelta)
+                if micDetected {
+                    Task { @MainActor in
+                        self.onQuestionDetected?()
+                    }
+                }
             }
         }
 

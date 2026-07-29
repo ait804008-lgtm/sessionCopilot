@@ -37,6 +37,30 @@ public final class SessionEngine {
     /// Suppresses auto question-detection in auto mode.
     private var isPTTKeyHeld = false
 
+    /// Rolling buffer of all STT transcript text. Continuously updated.
+    private var transcriptBuffer: String = ""
+
+    /// Snapshot of `transcriptBuffer` taken at system-silent transition,
+    /// with a 0.5s grace period for STT to catch up. Used as the question
+    /// text when the detector fires.
+    private var pendingQuestionText: String = ""
+
+    /// Timestamp when system audio first went silent. Used to allow a
+    /// grace period where pendingQuestionText can still be updated by
+    /// late-arriving STT transcripts.
+    private var systemSilentSince: Date?
+
+    /// Whether system audio was active on the last level meter sample.
+    private var wasSystemSpeaking = false
+
+    /// The question text that was last sent to the LLM.
+    private var lastFiredQuestionText: String = ""
+
+    /// True when a batch STT flush has been triggered and we're waiting
+    /// for the transcript to arrive through `transcriptStream`. When the
+    /// next `isFinal` segment arrives, it fires the LLM.
+    private var pendingBatchQuestion = false
+
     // MARK: - Init
 
     public init(
@@ -75,6 +99,13 @@ public final class SessionEngine {
             }
         }
 
+        transcriptBuffer = ""
+        pendingQuestionText = ""
+        systemSilentSince = nil
+        wasSystemSpeaking = false
+        lastFiredQuestionText = ""
+        pendingBatchQuestion = false
+        Log.session.info("Session starting — listenMode=\(self.listenMode, privacy: .public), stt=\(type(of: self.sttClient))")
         try await captureEngine.start()
         try await sttClient.start()
 
@@ -101,19 +132,40 @@ public final class SessionEngine {
         }
 
         // Monitor level meter for speech detection visual feedback.
+        // Also snapshots the transcript buffer when system audio transitions
+        // to silent — this captures the interviewer's question before the
+        // candidate starts answering and fills the buffer with their voice.
+        //
+        // Debounce: the indicator must hold its state for at least 0.4s
+        // before toggling. Without this, ambient noise hovering near the
+        // 0.08 threshold causes rapid flickering between Listening/Live.
+        //
         // In PTT mode, only update indicator while the PTT key is held.
-        // After release, stopListening() clears it and ambient noise won't re-enable.
         Task { [weak self] in
             guard let self else { return }
+            var lastIndicatorChange = Date.distantPast
+            let indicatorMinHold: TimeInterval = 0.4
             for await level in self.captureEngine.levelMeter {
-                let isSpeaking = level > 0.05
+                let isSpeaking = level > 0.08
                 await MainActor.run {
+                    // Detect system active→silent transition.
+                    let systemActive = self.captureEngine.isSystemSpeaking
+                    if self.wasSystemSpeaking && !systemActive {
+                        self.pendingQuestionText = self.transcriptBuffer
+                        self.systemSilentSince = Date()
+                    }
+                    self.wasSystemSpeaking = systemActive
+
                     if self.listenMode == "pushToTalk" {
                         if self.isPTTKeyHeld && isSpeaking {
                             self.viewModel.setDetectingSpeech(true)
                         }
                     } else {
-                        self.viewModel.setDetectingSpeech(isSpeaking)
+                        let now = Date()
+                        if now.timeIntervalSince(lastIndicatorChange) >= indicatorMinHold {
+                            self.viewModel.setDetectingSpeech(isSpeaking)
+                            lastIndicatorChange = now
+                        }
                     }
                 }
             }
@@ -125,6 +177,18 @@ public final class SessionEngine {
             guard let self else { return }
             for await segment in self.sttClient.transcriptStream {
                 let speaker = self.resolveSpeaker()
+                // Always accumulate the latest transcript into the rolling buffer.
+                if !segment.text.trimmingCharacters(in: .whitespaces).isEmpty {
+                    self.transcriptBuffer = segment.text
+                    // Also update pendingQuestionText during the 0.5s grace
+                    // period after system audio goes silent. SFSpeechRecognizer
+                    // delivers transcripts asynchronously — the real question
+                    // text often arrives after the audio has already stopped.
+                    if let silentSince = self.systemSilentSince,
+                       Date().timeIntervalSince(silentSince) < 0.5 {
+                        self.pendingQuestionText = segment.text
+                    }
+                }
                 let tagged = TranscriptSegment(
                     id: segment.id,
                     sessionId: segment.sessionId,
@@ -135,6 +199,24 @@ public final class SessionEngine {
                     confidence: segment.confidence
                 )
                 self.viewModel.appendTranscript(tagged)
+
+                // Phase B for batch STT: when a final transcript arrives
+                // after a silence-triggered flush, fire the LLM.
+                if self.pendingBatchQuestion, segment.isFinal,
+                   !segment.text.trimmingCharacters(in: .whitespaces).isEmpty {
+                    self.pendingBatchQuestion = false
+                    self.viewModel.setTranscribing(false)
+                    let questionText = segment.text.trimmingCharacters(in: .whitespaces)
+                    Log.session.info("Batch transcript arrived — \"\(questionText.prefix(60), privacy: .public)\"")
+                    guard questionText != self.lastFiredQuestionText else {
+                        Log.session.debug("Duplicate batch transcript, skipping LLM")
+                        continue
+                    }
+                    self.lastFiredQuestionText = questionText
+                    self.persistQuestion(questionText)
+                    self.onQuestionDetected?(questionText)
+                    Log.session.info("LLM fired for batch question")
+                }
 
                 // Persist only final segments to avoid excessive writes
                 if segment.isFinal, let store = self.sessionStore, let sid = self.currentSessionId {
@@ -152,29 +234,52 @@ public final class SessionEngine {
             }
         }
 
-        // Route question detection — restart STT so next utterance starts fresh.
+        // Route question detection — for streaming STT (Apple), fire the LLM
+        // immediately. For batch STT (Deepgram), trigger a flush and defer the
+        // LLM fire to when the transcript arrives through transcriptStream.
         // In PTT mode, only triggerPTTAnswer() drives question detection.
-        // In auto mode, suppressed while the PTT key is held; key-up triggers answer directly.
-        // Mic tap feeds the detector; gate ensures only system-side silence fires.
+        // In auto mode, suppressed while the PTT key is held.
         if let capture = captureEngine as? CaptureEngineImpl {
             capture.onQuestionDetected = { [weak self] in
-                Log.session.debug("SessionEngine — listenMode: \(self?.listenMode ?? "nil", privacy: .public)")
-                guard let self, self.listenMode != "pushToTalk", !self.isPTTKeyHeld else {
-                    Log.session.debug("SessionEngine BAILED")
-                    return
-                }
-                if let lastUser = self.viewModel.chatMessages.last(where: { $0.role == .user }) {
-                    Log.session.debug("SessionEngine — found lastUser, firing LLM")
-                    // Persist question as a segment before LLM answers.
-                    // SFSpeechRecognizer rarely emits isFinal during continuous dictation,
-                    // and restartRecognition() cancels the old task before a final result arrives.
-                    self.persistQuestion(lastUser.text)
-                    self.onQuestionDetected?(lastUser.text)
+                guard let self, self.listenMode != "pushToTalk", !self.isPTTKeyHeld else { return }
+
+                Log.session.debug("Question detected — sttType=\(type(of: self.sttClient)), buffer=\"\(self.transcriptBuffer.prefix(40))\", pendingBatch=\(self.pendingBatchQuestion)")
+
+                // Clear pending state from previous cycle.
+                self.pendingQuestionText = ""
+                self.transcriptBuffer = ""
+                self.systemSilentSince = nil
+
+                if self.sttClient is DeepgramSttClient {
+                    // Batch mode: trigger flush, LLM fires when transcript arrives.
+                    Log.session.info("Triggering batch flush")
+                    self.viewModel.setTranscribing(true)
+                    self.pendingBatchQuestion = true
+                    Task { await (self.sttClient as? DeepgramSttClient)?.triggerFlush() }
                 } else {
-                    Log.session.debug("SessionEngine — NO lastUser")
-                }
-                if let appleStt = self.sttClient as? AppleSttClient {
-                    appleStt.restartRecognition()
+                    // Streaming mode (Apple STT): fire LLM immediately with
+                    // whatever is in the transcript buffer or chat messages.
+                    var questionText = self.pendingQuestionText.trimmingCharacters(in: .whitespaces)
+                    if questionText.isEmpty {
+                        questionText = self.transcriptBuffer.trimmingCharacters(in: .whitespaces)
+                    }
+                    if questionText.isEmpty {
+                        questionText = self.viewModel.chatMessages
+                            .last(where: { $0.role == .user })?.text
+                            .trimmingCharacters(in: .whitespaces) ?? ""
+                    }
+                    guard !questionText.isEmpty else {
+                        Log.session.debug("No question text available, skipping")
+                        return
+                    }
+                    guard questionText != self.lastFiredQuestionText else {
+                        Log.session.debug("Duplicate question text, skipping")
+                        return
+                    }
+
+                    self.lastFiredQuestionText = questionText
+                    self.persistQuestion(questionText)
+                    self.onQuestionDetected?(questionText)
                 }
             }
         }
@@ -270,13 +375,24 @@ public final class SessionEngine {
     public func triggerPTTAnswer() {
         guard isPTTKeyHeld else { return }
         isPTTKeyHeld = false
-        // Persist question + trigger answer with current transcript
-        if let lastUser = viewModel.chatMessages.last(where: { $0.role == .user }) {
-            persistQuestion(lastUser.text)
-            onQuestionDetected?(lastUser.text)
-        }
-        if let appleStt = sttClient as? AppleSttClient {
-            appleStt.restartRecognition()
+
+        if let deepgramStt = sttClient as? DeepgramSttClient {
+            // Batch mode: trigger flush, LLM fires when transcript arrives.
+            viewModel.setTranscribing(true)
+            pendingBatchQuestion = true
+            transcriptBuffer = ""
+            Task { await deepgramStt.triggerFlush() }
+        } else {
+            // Streaming mode: use transcript buffer immediately.
+            let questionText = transcriptBuffer.trimmingCharacters(in: .whitespaces)
+            transcriptBuffer = ""
+            if !questionText.isEmpty {
+                persistQuestion(questionText)
+                onQuestionDetected?(questionText)
+            }
+            if let appleStt = sttClient as? AppleSttClient {
+                appleStt.restartRecognition()
+            }
         }
         // Clean up — only called in PTT mode (hotkey gated in AppDelegate)
         stopListening()
