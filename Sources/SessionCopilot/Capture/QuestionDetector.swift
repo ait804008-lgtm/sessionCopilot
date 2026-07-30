@@ -2,9 +2,23 @@ import Foundation
 
 /// Detects question boundaries using a silence + speech-resumption heuristic.
 /// Emits `onSilenceDetected` when silence exceeds threshold (question ended).
+///
+/// Uses hysteresis on the speech/silence boundary to prevent noise-driven
+/// toggling. Speech onset requires a higher level (`speechOnThreshold`)
+/// than silence detection (`speechOffThreshold`), creating a dead zone
+/// that filters out ambient noise hovering near a single threshold.
 public final class QuestionDetector {
     private let silenceThreshold: TimeInterval
-    private let speechLevelThreshold: Float = 0.05
+
+    /// Level above which audio is considered speech (onset).
+    /// Higher than `speechOffThreshold` to create hysteresis dead zone.
+    private let speechOnThreshold: Float = 0.08
+
+    /// Level at or below which audio is considered silence (offset).
+    /// Lower than `speechOnThreshold` — once speaking, must drop below
+    /// this to begin the silence countdown.
+    private let speechOffThreshold: Float = 0.03
+
     private var _isSpeaking = false
     private var silenceAccumulator: TimeInterval = 0
     private var didFireForCurrentSilence = false
@@ -38,7 +52,20 @@ public final class QuestionDetector {
 
         guard !_isDisabled else { return false }
 
-        let isSpeechNow = level > speechLevelThreshold
+        // Hysteresis: speech onset requires crossing the higher threshold;
+        // silence offset requires dropping below the lower threshold.
+        // This dead zone prevents ambient noise from rapidly cycling the
+        // detector state machine.
+        let isSpeechNow: Bool
+        if _isSpeaking {
+            // Already speaking — only transition to silence when level
+            // drops below the lower (offset) threshold.
+            isSpeechNow = level > speechOffThreshold
+        } else {
+            // Currently silent — only transition to speech when level
+            // exceeds the higher (onset) threshold.
+            isSpeechNow = level > speechOnThreshold
+        }
 
         if isSpeechNow {
             silenceAccumulator = 0

@@ -12,6 +12,42 @@ public enum CaptureState: Sendable {
     case failed(Error)
 }
 
+/// High-level status for UI consumers (menu bar indicator, overlay).
+public enum CaptureStatus: Sendable, Equatable {
+    case idle
+    case micOnly
+    case systemActive
+    case systemFallback
+    case failed(CaptureError)
+
+    /// Short user-facing label suitable for the menu bar tooltip.
+    public var label: String {
+        switch self {
+        case .idle: return "Idle"
+        case .micOnly: return "Mic only"
+        case .systemActive: return "System + Mic"
+        case .systemFallback: return "Fallback (mic)"
+        case .failed: return "Failed"
+        }
+    }
+
+    /// Color name (NSColor.Name-compatible) for the status dot.
+    public var dotColorName: String {
+        switch self {
+        case .idle: return "secondaryLabelColor"
+        case .micOnly: return "systemBlueColor"
+        case .systemActive: return "systemGreenColor"
+        case .systemFallback: return "systemOrangeColor"
+        case .failed: return "systemRedColor"
+        }
+    }
+
+    /// SF Symbol name for the menu bar status dot.
+    public var dotSymbol: String {
+        return "circle.fill"
+    }
+}
+
 /// Default implementation of CaptureEngine.
 ///
 /// - Microphone: AVAudioEngine input tap.
@@ -119,12 +155,16 @@ public final class CaptureEngineImpl: @unchecked Sendable, CaptureEngine {
     // MARK: - VAD
 
     /// Detects question boundaries from system (interviewer) audio.
-    let systemDetector = QuestionDetector(silenceThreshold: 1.5)
+    let systemDetector: QuestionDetector
     /// Tracks candidate (mic) speech for speaker attribution only — does NOT fire.
-    private let micDetector = QuestionDetector(silenceThreshold: 1.5)
+    private let micDetector: QuestionDetector
     private var lastMicTime = Date()
     private var lastSystemTime = Date()
     public var onQuestionDetected: (() -> Void)?
+
+    /// High-level capture status callback. Wired to menu bar indicator
+    /// via `SessionLifecycleController`.
+    public var onStatusChange: ((CaptureStatus) -> Void)?
 
     public var isSystemSpeaking: Bool { systemDetector.isSpeaking }
     public var isMicSpeaking: Bool { micDetector.isSpeaking }
@@ -152,8 +192,10 @@ public final class CaptureEngineImpl: @unchecked Sendable, CaptureEngine {
 
     // MARK: - Init
 
-    public init(captureSystemAudio: Bool = false) {
+    public init(captureSystemAudio: Bool = false, silenceThreshold: TimeInterval = 1.5) {
         self.captureSystemAudio = captureSystemAudio
+        self.systemDetector = QuestionDetector(silenceThreshold: silenceThreshold)
+        self.micDetector = QuestionDetector(silenceThreshold: silenceThreshold)
 
         var audioCont: AsyncStream<AudioBuffer>.Continuation!
         self.audioStream = AsyncStream { audioCont = $0 }
@@ -227,7 +269,12 @@ public final class CaptureEngineImpl: @unchecked Sendable, CaptureEngine {
             // the systemDetector from the mic so question detection still
             // works (with degraded speaker attribution).
             if self.captureSystemAudio && self.didFallbackToMic {
-                self.systemDetector.feed(level: capturedRMS, deltaTime: micDelta)
+                let micDetected = self.systemDetector.feed(level: capturedRMS, deltaTime: micDelta)
+                if micDetected {
+                    Task { @MainActor in
+                        self.onQuestionDetected?()
+                    }
+                }
             }
         }
 
@@ -673,12 +720,12 @@ private final class SCAudioOutputBox: NSObject, SCStreamOutput, @unchecked Senda
 
 // MARK: - Errors
 
-enum CaptureError: Error, Equatable {
+public enum CaptureError: Error, Equatable {
     case invalidFormat
     case noDisplay
     case scStreamFailed(String)
 
-    static func == (lhs: CaptureError, rhs: CaptureError) -> Bool {
+    public static func == (lhs: CaptureError, rhs: CaptureError) -> Bool {
         switch (lhs, rhs) {
         case (.invalidFormat, .invalidFormat): return true
         case (.noDisplay, .noDisplay): return true

@@ -160,7 +160,12 @@ public struct Session: Codable, Sendable, Identifiable {
     public var suggestions: [Suggestion]
     public var metadata: [String: String]
 
-    public init(id: UUID = UUID(), profileId: UUID, mode: Mode, title: String? = nil, status: Status = .preflight, startedAt: Date = Date(), endedAt: Date? = nil, segments: [TranscriptSegment] = [], suggestions: [Suggestion] = [], metadata: [String: String] = [:]) {
+    /// Relative path to the recorded audio file (WAV, 16kHz Int16 mono)
+    /// under `~/Library/Application Support/SessionCopilot/audio/`.
+    /// Nil if audio recording was disabled or the file was deleted.
+    public var audioFilePath: String?
+
+    public init(id: UUID = UUID(), profileId: UUID, mode: Mode, title: String? = nil, status: Status = .preflight, startedAt: Date = Date(), endedAt: Date? = nil, segments: [TranscriptSegment] = [], suggestions: [Suggestion] = [], metadata: [String: String] = [:], audioFilePath: String? = nil) {
         self.id = id
         self.profileId = profileId
         self.mode = mode
@@ -171,6 +176,7 @@ public struct Session: Codable, Sendable, Identifiable {
         self.segments = segments
         self.suggestions = suggestions
         self.metadata = metadata
+        self.audioFilePath = audioFilePath
     }
 }
 
@@ -229,6 +235,18 @@ public struct ProviderConfig: Codable, Sendable, Identifiable {
         case deepgram
         case gemini
         case custom
+
+        /// Whether this provider supports LLM chat completions (as opposed
+        /// to being STT-only like Deepgram). Used to filter `defaultConfig()`
+        /// so an STT provider never gets picked up for LLM calls.
+        public var isLLM: Bool {
+            switch self {
+            case .deepseek, .anthropic, .openai, .nemotron, .gemini, .custom:
+                return true
+            case .deepgram:
+                return false
+            }
+        }
     }
 
     public let id: UUID
@@ -307,7 +325,37 @@ public struct AppSettings: Codable, Sendable {
     /// "auto" = always listening; "pushToTalk" = hold hotkey to listen
     public var listenMode: String
 
-    public init(hotkeys: Hotkeys = Hotkeys(), opacity: Double = 0.8, clickThrough: Bool = false, retentionDays: Int = 30, defaultModels: [String: String] = [:], exportPath: String? = nil, sttProvider: String = "apple", sttLanguage: String = "en", listenMode: String = "auto") {
+    /// When true, candidate questions detected by VAD are confirmed by an
+    /// LLM call before answer generation fires. Avoids spurious LLM calls
+    /// on natural thinking pauses. Default: true (recommended).
+    public var semanticDetectionEnabled: Bool
+
+    /// Silence threshold in seconds. When the interviewer stops speaking
+    /// for this long, `QuestionDetector` fires `onQuestionDetected`.
+    /// Lower = more aggressive (fires on short pauses); higher = more
+    /// conservative (waits for longer silences). Default: 1.5s.
+    /// Range: 0.5s – 5.0s. Adjust in Settings → General.
+    public var silenceThreshold: Double
+
+    /// When true, audio (mic + system, mixed) is recorded to a WAV file
+    /// for each session and made available for replay in SessionDetailView.
+    /// Default: true. Storage cost: ~10 MB per 30-min session at 16kHz Int16 mono.
+    public var audioRecordingEnabled: Bool
+
+    public init(
+        hotkeys: Hotkeys = Hotkeys(),
+        opacity: Double = 0.8,
+        clickThrough: Bool = false,
+        retentionDays: Int = 30,
+        defaultModels: [String: String] = [:],
+        exportPath: String? = nil,
+        sttProvider: String = "apple",
+        sttLanguage: String = "en",
+        listenMode: String = "auto",
+        semanticDetectionEnabled: Bool = true,
+        silenceThreshold: Double = 1.5,
+        audioRecordingEnabled: Bool = true
+    ) {
         self.hotkeys = hotkeys
         self.opacity = opacity
         self.clickThrough = clickThrough
@@ -317,6 +365,33 @@ public struct AppSettings: Codable, Sendable {
         self.sttProvider = sttProvider
         self.sttLanguage = sttLanguage
         self.listenMode = listenMode
+        self.semanticDetectionEnabled = semanticDetectionEnabled
+        self.silenceThreshold = silenceThreshold
+        self.audioRecordingEnabled = audioRecordingEnabled
+    }
+
+    // MARK: - Codable (backward-compatible decoding)
+
+    private enum CodingKeys: String, CodingKey {
+        case hotkeys, opacity, clickThrough, retentionDays, defaultModels
+        case exportPath, sttProvider, sttLanguage, listenMode
+        case semanticDetectionEnabled, silenceThreshold, audioRecordingEnabled
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        hotkeys = try c.decodeIfPresent(Hotkeys.self, forKey: .hotkeys) ?? Hotkeys()
+        opacity = try c.decodeIfPresent(Double.self, forKey: .opacity) ?? 0.8
+        clickThrough = try c.decodeIfPresent(Bool.self, forKey: .clickThrough) ?? false
+        retentionDays = try c.decodeIfPresent(Int.self, forKey: .retentionDays) ?? 30
+        defaultModels = try c.decodeIfPresent([String: String].self, forKey: .defaultModels) ?? [:]
+        exportPath = try c.decodeIfPresent(String.self, forKey: .exportPath)
+        sttProvider = try c.decodeIfPresent(String.self, forKey: .sttProvider) ?? "apple"
+        sttLanguage = try c.decodeIfPresent(String.self, forKey: .sttLanguage) ?? "en"
+        listenMode = try c.decodeIfPresent(String.self, forKey: .listenMode) ?? "auto"
+        semanticDetectionEnabled = try c.decodeIfPresent(Bool.self, forKey: .semanticDetectionEnabled) ?? true
+        silenceThreshold = try c.decodeIfPresent(Double.self, forKey: .silenceThreshold) ?? 1.5
+        audioRecordingEnabled = try c.decodeIfPresent(Bool.self, forKey: .audioRecordingEnabled) ?? true
     }
 }
 
@@ -389,4 +464,49 @@ public enum SessionMode: String, Codable, Sendable, CaseIterable {
         case .meeting: return "meeting"
         }
     }
+}
+
+// MARK: - Question Classification
+
+/// Result of a semantic question classification.
+///
+/// Produced by `QuestionClassifier.classify(_:context:)`. Used by
+/// `SessionEngine` to gate answer generation: when
+/// `semanticDetectionEnabled` is true, the LLM answer is only triggered
+/// if `isQuestion == true`. This avoids spurious LLM calls on the
+/// candidate's own thinking pauses (which the pure-VAD `QuestionDetector`
+/// can't distinguish from interviewer silence).
+public struct QuestionClassification: Codable, Sendable, Equatable {
+    /// True if the classified text is judged to be a question directed
+    /// at the candidate (i.e. requires an answer).
+    public let isQuestion: Bool
+    /// Confidence in the classification, 0.0 – 1.0.
+    public let confidence: Double
+    /// Optional short rationale explaining the classification. Logged
+    /// for debugging; not shown to the user.
+    public let rationale: String?
+
+    public init(isQuestion: Bool, confidence: Double, rationale: String? = nil) {
+        self.isQuestion = isQuestion
+        self.confidence = confidence
+        self.rationale = rationale
+    }
+
+    /// Default "yes" classification used when the classifier is disabled
+    /// or unavailable. Maintains backward-compatible behavior (every
+    /// VAD trigger fires the LLM answer).
+    public static let assumedYes = QuestionClassification(
+        isQuestion: true,
+        confidence: 1.0,
+        rationale: "Semantic classification disabled — assuming question."
+    )
+
+    /// Default "no" classification used when the classifier call fails.
+    /// Conservative: don't fire the LLM on errors, since spurious LLM
+    /// calls cost money and pollute the overlay.
+    public static let assumedNo = QuestionClassification(
+        isQuestion: false,
+        confidence: 0.0,
+        rationale: "Classification failed — assuming not a question."
+    )
 }

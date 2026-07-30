@@ -104,7 +104,12 @@ public final class ProviderConfigStore: ObservableObject {
             return configs.first { $0.provider == provider && $0.isDefault }
                 ?? configs.first { $0.provider == provider }
         }
-        return configs.first { $0.isDefault } ?? configs.first
+        // When no specific provider is requested (LLM call sites), only
+        // consider LLM-capable providers. Otherwise an STT provider like
+        // Deepgram that's marked as default would be picked up for LLM
+        // calls and fail with a nonsensical "NO API KEY for deepgram" error.
+        return configs.first { $0.isDefault && $0.provider.isLLM }
+            ?? configs.first { $0.provider.isLLM }
     }
 
     // MARK: - Persistence

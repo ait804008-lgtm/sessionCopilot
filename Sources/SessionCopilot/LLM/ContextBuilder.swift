@@ -120,4 +120,41 @@ public struct ContextBuilder: Sendable {
         ```
         """
     }
+
+    // MARK: - Classification
+
+    /// Build template variables for `classification/question.md`.
+    public static func buildClassificationVariables(
+        text: String,
+        transcript: String = ""
+    ) -> [String: String] {
+        return [
+            "text": text,
+            "transcript": transcript.isEmpty ? "N/A" : transcript
+        ]
+    }
+
+    /// Build prompt context for question classification.
+    /// Inline fallback when the `classification/question.md` template
+    /// is unavailable.
+    public static func classification(
+        text: String,
+        transcript: String = ""
+    ) -> String {
+        let transcriptSection = transcript.isEmpty
+            ? "N/A"
+            : transcript
+        return """
+        You are a classification engine. Determine whether the candidate text below is a question directed at the candidate by an interviewer.
+
+        ## Recent Transcript
+        \(transcriptSection)
+
+        ## Candidate Text
+        \(text)
+
+        Respond with exactly one JSON object on one line:
+        {"is_question": true/false, "confidence": 0.0-1.0, "rationale": "short reason"}
+        """
+    }
 }
